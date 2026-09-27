@@ -1,0 +1,212 @@
+#!/bin/bash
+# iterm-attach — open an iTerm2 tab on an SSH connection that is already open
+# elsewhere (e.g. in Terminal.app, or by another program).
+#
+# It relies on OpenSSH multiplexing: every ssh started with ControlMaster in
+# ~/.ssh/config leaves a socket behind; a new session over that socket needs no
+# authentication at all.
+#
+#   iterm-attach            pick a connection (Enter = the first one not yet in iTerm2)
+#   iterm-attach web01      the connection whose name contains "web01"
+#   iterm-attach -a         open every connection that is not yet in iTerm2
+#   iterm-attach -l         just list them
+#   iterm-attach -h         help
+#
+# Without a terminal (Shortcuts, Alfred, Raycast...) the choice is a macOS dialog.
+set -uo pipefail
+
+SOCKETS_GLOB="${ITERM_ATTACH_SOCKETS:-$HOME/.ssh/cm-*}"
+
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+list_only=0 all=0 filter=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -l|--list) list_only=1 ;;
+    -a|--all) all=1 ;;
+    -h|--help) usage 0 ;;
+    -*) echo "Opzione sconosciuta: $1" >&2; usage 2 ;;
+    *) filter="$1" ;;
+  esac
+  shift
+done
+
+if [ -t 1 ]; then B=$'\e[1m' D=$'\e[2m' G=$'\e[32m' Y=$'\e[33m' R=$'\e[0m'; else B='' D='' G='' Y='' R=''; fi
+
+# pid -> terminal app (iTerm2 / Terminal / other), found by walking up the process tree
+PS_TABLE=$(ps -Ao pid=,ppid=,comm=)
+app_of() {
+  printf '%s\n' "$PS_TABLE" | awk -v pid="$1" '
+    { p=$1; pp[p]=$2; $1=""; $2=""; c[p]=$0 }
+    END {
+      for (i = 0; i < 64 && pid > 1; i++) {
+        if (c[pid] ~ /iTerm/) { print "iTerm2"; exit }
+        if (c[pid] ~ /Terminal\.app|\/Terminal$/) { print "Terminal"; exit }
+        pid = pp[pid]
+      }
+      print "altro"
+    }'
+}
+
+# One line per interactive ssh process: socket <TAB> user@host <TAB> app
+ssh_sessions() {
+  ps -Ao pid=,command= | while read -r pid cmd; do
+    case "$cmd" in ssh\ *|/usr/bin/ssh\ *) ;; *) continue ;; esac
+    case "$cmd" in *" -W "*|*" -O "*|*"[mux]"*|*" -s "*|*" -N "*) continue ;; esac
+    # shellcheck disable=SC2086
+    set -- $cmd; shift
+    cfg=$(ssh -G "$@" 2>/dev/null) || continue
+    cp=$(printf '%s\n' "$cfg" | awk '$1=="controlpath"{print $2; exit}')
+    [ -n "$cp" ] && [ "$cp" != none ] || continue
+    user=$(printf '%s\n' "$cfg" | awk '$1=="user"{print $2; exit}')
+    host=$(printf '%s\n' "$cfg" | awk '$1=="hostname"{print $2; exit}')
+    # a tab opened by iterm-attach has a placeholder host: keep the label of the original
+    printf '%s\t%s@%s\t%s\n' "${cp/#\~/$HOME}" "$user" "$host" "$(app_of "$pid")"
+  done
+}
+
+SESSIONS=$(ssh_sessions)
+
+# PAM / session-recording SSH proxies drop the whole connection when a
+# second channel is opened: their users are one-time UUID tokens. Never touch them.
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@'
+PAM_HOSTS="${ITERM_ATTACH_PAM_HOSTS:-}"
+protected=()
+
+names=() socks=() dests=() in_iterm=()
+for s in $SOCKETS_GLOB; do
+  [ -S "$s" ] || continue
+  ssh -S "$s" -O check mux >/dev/null 2>&1 || continue
+  rows=$(printf '%s\n' "$SESSIONS" | awk -F'\t' -v s="$s" '$1==s')
+  pam_dest=$(printf '%s\n' "$rows" | awk -F'\t' 'NF{print $2}' | grep -E "$UUID_RE" | head -n1)
+  if [ -z "$pam_dest" ] && [ -n "$PAM_HOSTS" ]; then
+    for h in ${PAM_HOSTS//,/ }; do
+      pam_dest=$(printf '%s\n' "$rows" | awk -F'\t' -v h="$h" 'NF && tolower($2) ~ ("@" tolower(h) "$") {print $2; exit}')
+      [ -n "$pam_dest" ] && break
+    done
+  fi
+  if [ -n "$pam_dest" ]; then
+    protected+=("${pam_dest#*@} (sessione PAM, non condivisibile)")
+    continue
+  fi
+  if [ -z "$rows" ]; then
+    # nobody holds this socket in a terminal: asking the server would open a channel,
+    # which a PAM proxy punishes by closing the connection. Only list it, by socket name.
+    dest="$(basename "$s")"
+    names+=("$dest  —  in background"); socks+=("$s"); dests+=("$dest"); in_iterm+=(0)
+    continue
+  fi
+  apps=$(printf '%s\n' "$rows" | awk -F'\t' 'NF{print $3}' | sort -u | paste -sd, - | sed 's/,/, /g')
+  # prefer the name used outside iTerm2 (the one typed by whoever opened it)
+  dest=$(printf '%s\n' "$rows" | awk -F'\t' '$3!="iTerm2" && NF{print $2; exit}')
+  [ -n "$dest" ] || dest=$(printf '%s\n' "$rows" | awk -F'\t' 'NF{print $2; exit}')
+  [ -n "$dest" ] || dest="(sconosciuto)"
+  [ -n "$apps" ] || apps="in background"
+  if [ -n "$filter" ] && [[ "$dest $apps" != *"$filter"* ]]; then continue; fi
+  names+=("$dest  —  $apps"); socks+=("$s"); dests+=("$dest")
+  case "$apps" in *iTerm2*) in_iterm+=(1) ;; *) in_iterm+=(0) ;; esac
+done
+
+print_protected() {
+  [ ${#protected[@]} -eq 0 ] && return
+  for p in "${protected[@]}"; do printf '   %s🔒 %s%s\n' "$D" "$p" "$R"; done
+}
+
+n=${#socks[@]}
+if [ "$n" -eq 0 ]; then
+  print_protected
+  msg="Nessuna connessione SSH condivisibile trovata${filter:+ per \"$filter\"}."
+  echo "$msg" >&2
+  echo "Serve ControlMaster in ~/.ssh/config (vedi README) e una connessione aperta dopo averlo attivato." >&2
+  [ -t 0 ] || osascript -e "display alert \"iterm-attach\" message \"$msg\"" >/dev/null 2>&1
+  exit 1
+fi
+
+first_new=-1
+for i in "${!socks[@]}"; do [ "${in_iterm[$i]}" = 0 ] && { first_new=$i; break; }; done
+
+print_list() {
+  for i in "${!names[@]}"; do
+    if [ "${in_iterm[$i]}" = 1 ]; then mark="${G}✓ già in iTerm2${R}"; else mark="${Y}● non ancora in iTerm2${R}"; fi
+    printf '  %s%2d)%s %s  %s\n' "$B" $((i + 1)) "$R" "${names[$i]}" "$mark"
+  done
+}
+
+if [ $list_only -eq 1 ]; then print_list; print_protected; exit 0; fi
+
+open_in_iterm() {  # $1 socket, $2 label
+  # The destination is only a label: over the socket OpenSSH reuses the master's connection.
+  local cmd
+  cmd="ssh -S $(printf '%q' "$1") -o ControlMaster=no $(printf '%q' "$2")"
+  osascript - "$cmd" "$2" <<'OSA' >/dev/null
+on run argv
+  set theCmd to item 1 of argv
+  set theName to item 2 of argv
+  tell application "iTerm2"
+    activate
+    if (count of windows) is 0 then
+      set w to (create window with default profile)
+    else
+      set w to current window
+      tell w to create tab with default profile
+    end if
+    tell current session of w
+      set name to theName
+      write text theCmd
+    end tell
+  end tell
+end run
+OSA
+  echo "Aperto in iTerm2: $2"
+}
+
+picks=()
+if [ $all -eq 1 ]; then
+  for i in "${!socks[@]}"; do [ "${in_iterm[$i]}" = 0 ] && picks+=("$i"); done
+  [ ${#picks[@]} -gt 0 ] || { echo "Tutte le connessioni sono già aperte in iTerm2."; exit 0; }
+elif [ "$n" -eq 1 ] && [ -n "$filter" -o "${in_iterm[0]}" = 0 ]; then
+  picks=(0)
+elif [ -t 0 ]; then
+  echo "${B}Connessioni SSH aperte:${R}"
+  print_list
+  print_protected
+  if [ $first_new -ge 0 ]; then
+    printf 'Quale apro in iTerm2? [1-%d, Invio = %d, a = tutte le nuove] ' "$n" $((first_new + 1))
+  else
+    printf '%sSono già tutte in iTerm2.%s Quale apro comunque? [1-%d] ' "$D" "$R" "$n"
+  fi
+  read -r ans
+  if [ -z "$ans" ] && [ $first_new -ge 0 ]; then picks=("$first_new")
+  elif [ "$ans" = a ]; then for i in "${!socks[@]}"; do [ "${in_iterm[$i]}" = 0 ] && picks+=("$i"); done
+  elif [[ "$ans" =~ ^[0-9]+$ ]] && [ "$ans" -ge 1 ] && [ "$ans" -le "$n" ]; then picks=($((ans - 1)))
+  else echo "Annullato."; exit 1
+  fi
+else
+  # no terminal: native macOS chooser
+  items=() default=""
+  for i in "${!names[@]}"; do
+    if [ "${in_iterm[$i]}" = 1 ]; then items+=("${names[$i]}  ✓"); else items+=("${names[$i]}  ●"); fi
+    [ "$i" = "$first_new" ] && default="${items[$i]}"
+  done
+  [ -n "$default" ] || default="${items[0]}"
+  chosen=$(osascript - "$default" "${items[@]}" <<'OSA'
+on run argv
+  set def to item 1 of argv
+  set theItems to rest of argv
+  set r to choose from list theItems with title "iterm-attach" with prompt "Connessione da aprire in iTerm2 (● = non ancora in iTerm2):" default items {def} OK button name "Apri" with multiple selections allowed
+  if r is false then return ""
+  set text item delimiters to linefeed
+  return r as text
+end run
+OSA
+)
+  [ -n "$chosen" ] || exit 1
+  while IFS= read -r line; do
+    for i in "${!items[@]}"; do [ "${items[$i]}" = "$line" ] && picks+=("$i"); done
+  done <<< "$chosen"
+fi
+
+for i in "${picks[@]}"; do
+  open_in_iterm "${socks[$i]}" "${dests[$i]}"
+  sleep 0.3
+done

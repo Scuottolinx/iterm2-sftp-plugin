@@ -1,0 +1,980 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFTP Browser</title>
+<style>
+:root {
+  --bg: #f0f0f0; --panel: #ffffff; --panel-alt: #f7f9fc; --border: #c9ced6; --border-soft: #e2e5ea;
+  --text: #1d1f23; --muted: #6b7280; --accent: #1f6fd1; --accent-soft: #e6f0fc;
+  --sel: #cce8ff; --sel-border: #99d1ff; --hover: #e5f3ff; --danger: #c62828; --ok: #2e7d32; --warn: #b26a00;
+  --btn: linear-gradient(#fdfdfd, #e9ebee); --btn-hover: linear-gradient(#ffffff, #dde6f3);
+  --folder: #f2c34d; --folder-dark: #d9a52a; --file: #8a94a6; --bar: #3b8ae6; --bar-bg: #dfe3e8;
+  --shadow: 0 6px 24px rgba(0,0,0,.18);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #2b2d31; --panel: #1f2023; --panel-alt: #25272b; --border: #44474d; --border-soft: #34363b;
+    --text: #e3e5e8; --muted: #9aa0a8; --accent: #5aa2ff; --accent-soft: #23344d;
+    --sel: #264f78; --sel-border: #3a6ea5; --hover: #2c3440; --danger: #ef6b6b; --ok: #6cc36f; --warn: #e5a54b;
+    --btn: linear-gradient(#3a3d42, #313338); --btn-hover: linear-gradient(#44484e, #3a3e44);
+    --folder: #e8b93f; --folder-dark: #c5962a; --file: #9aa3b2; --bar: #4c9aff; --bar-bg: #3a3d42;
+    --shadow: 0 6px 24px rgba(0,0,0,.5);
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  display: flex; flex-direction: column; overflow: hidden; user-select: none; -webkit-user-select: none;
+}
+button { font: inherit; color: inherit; }
+input, select { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 3px; padding: 3px 5px; }
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+svg.i { width: 16px; height: 16px; flex: none; }
+
+/* ---------- header ---------- */
+#hdr { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-bottom: 1px solid var(--border); background: var(--bg); min-width: 0; }
+#conn { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+#conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+#conn .dot.ready { background: var(--ok); } #conn .dot.connecting { background: var(--warn); animation: pulse 1s infinite; }
+#conn .dot.error, #conn .dot.nomux { background: var(--danger); }
+@keyframes pulse { 50% { opacity: .35; } }
+#conn .host { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#conn .mode { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; }
+.ibtn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 1px solid transparent; border-radius: 3px; background: none; cursor: default; padding: 0; flex: none; }
+.ibtn:hover:not(:disabled) { background: var(--btn-hover); border-color: var(--border); }
+.ibtn:active:not(:disabled) { transform: translateY(1px); }
+.ibtn.on { background: var(--accent-soft); border-color: var(--sel-border); }
+.ibtn:disabled { opacity: .35; }
+
+/* ---------- toolbar + path ---------- */
+#tb { display: flex; align-items: center; gap: 1px; padding: 3px 4px; background: var(--bg); border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+#tb .sep { width: 1px; height: 18px; background: var(--border); margin: 0 3px; }
+#pathrow { display: flex; gap: 4px; padding: 4px 6px; background: var(--bg); border-bottom: 1px solid var(--border); }
+#path { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+
+/* ---------- banner ---------- */
+#banner { display: none; padding: 10px; margin: 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel); }
+#banner.show { display: block; }
+#banner h3 { margin: 0 0 4px; font-size: 13px; }
+#banner p { margin: 4px 0 8px; color: var(--muted); }
+#banner pre { background: var(--panel-alt); border: 1px solid var(--border-soft); padding: 6px 8px; border-radius: 3px; font-size: 11px; user-select: text; -webkit-user-select: text; overflow: auto; }
+#banner .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn { border: 1px solid var(--border); background: var(--btn); border-radius: 3px; padding: 4px 10px; cursor: default; }
+.btn:hover { background: var(--btn-hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--danger); }
+
+/* ---------- main split ---------- */
+#main { flex: 1; display: flex; min-height: 0; position: relative; }
+#tree { width: 190px; min-width: 120px; overflow: auto; background: var(--panel); border-right: 1px solid var(--border); display: none; padding: 3px 0; }
+body.tree-on #tree { display: block; }
+#splitter { width: 4px; cursor: col-resize; display: none; margin-left: -2px; margin-right: -2px; z-index: 2; }
+body.tree-on #splitter { display: block; }
+.tn { display: flex; align-items: center; gap: 3px; padding: 1px 6px 1px 0; white-space: nowrap; cursor: default; }
+.tn:hover { background: var(--hover); }
+.tn.cur { background: var(--sel); }
+.tn .tw { width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); flex: none; }
+.tn .tw svg { width: 9px; height: 9px; transition: transform .1s; }
+.tn.open > .tw svg { transform: rotate(90deg); }
+.tn .nm { overflow: hidden; text-overflow: ellipsis; }
+
+#listwrap { flex: 1; overflow: auto; background: var(--panel); position: relative; outline: none; }
+table { border-collapse: separate; border-spacing: 0; width: 100%; table-layout: fixed; }
+thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--border); border-right: 1px solid var(--border-soft); font-weight: 500; text-align: left; padding: 3px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+thead th:hover { background: var(--btn-hover); }
+thead th .ar { font-size: 9px; margin-left: 3px; }
+tbody td { padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 1px solid transparent; border-width: 1px 0; height: 21px; }
+tbody tr:nth-child(even) td { background: var(--panel-alt); }
+tbody tr:hover td { background: var(--hover); }
+tbody tr.sel td { background: var(--sel); border-color: var(--sel-border); }
+tbody tr.cursor td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+tbody tr.drop td { background: var(--accent-soft); border-color: var(--accent); }
+tbody tr.dot td { color: var(--muted); }
+td.name { display: flex; align-items: center; gap: 5px; }
+td.name span { overflow: hidden; text-overflow: ellipsis; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+col.c-name { width: auto; } col.c-size { width: 72px; } col.c-date { width: 118px; } col.c-own { width: 70px; } col.c-grp { width: 70px; } col.c-mode { width: 88px; }
+@media (max-width: 620px) { .c-own, .c-grp, .col-own, .col-grp { display: none; } }
+@media (max-width: 480px) { .c-mode, .col-mode { display: none; } }
+@media (max-width: 380px) { .c-date, .col-date { display: none; } }
+#empty { padding: 24px; text-align: center; color: var(--muted); display: none; }
+#loading { position: absolute; top: 28px; right: 10px; color: var(--muted); display: none; }
+
+#dropzone { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: color-mix(in srgb, var(--accent) 12%, transparent); border: 2px dashed var(--accent); z-index: 5; pointer-events: none; font-weight: 600; color: var(--accent); text-align: center; padding: 20px; }
+body.dragging #dropzone { display: flex; }
+
+/* ---------- bottom ---------- */
+#foot { border-top: 1px solid var(--border); background: var(--bg); padding: 4px 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#foot label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+#foot .hint { color: var(--muted); font-size: 11px; }
+#count { margin-left: auto; color: var(--muted); white-space: nowrap; }
+
+#xfer { border-top: 1px solid var(--border); background: var(--panel); display: flex; flex-direction: column; max-height: 40vh; }
+#xfer .xh { display: flex; align-items: center; gap: 6px; padding: 3px 6px; background: var(--bg); border-bottom: 1px solid var(--border-soft); }
+#xfer .xh .tab { padding: 2px 8px; border-radius: 3px; cursor: default; }
+#xfer .xh .tab.on { background: var(--panel); border: 1px solid var(--border); }
+#xfer .xh .tab .badge { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 10px; text-align: center; margin-left: 3px; }
+#xfer .xh .sp { flex: 1; }
+#xfer .xb { overflow: auto; display: none; }
+#xfer.open .xb { display: block; }
+#xfer .xh .tab .badge[hidden] { display: none; }
+.xi { display: grid; grid-template-columns: 16px 1fr auto; gap: 2px 6px; align-items: center; padding: 4px 6px; border-bottom: 1px solid var(--border-soft); }
+.xi .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xi .meta { grid-column: 2; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.xi .meta.err { color: var(--danger); }
+.xi .acts { grid-row: 1 / span 3; grid-column: 3; display: flex; }
+.bar { grid-column: 2; height: 4px; background: var(--bar-bg); border-radius: 2px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--bar); width: 0; transition: width .25s; }
+.xi.done .bar > div { background: var(--ok); } .xi.error .bar > div { background: var(--danger); }
+.xempty { padding: 10px; color: var(--muted); text-align: center; }
+
+/* ---------- menus, dialogs, toasts ---------- */
+#menu { position: fixed; z-index: 50; background: var(--panel); border: 1px solid var(--border); box-shadow: var(--shadow); border-radius: 4px; padding: 3px 0; min-width: 190px; display: none; }
+#menu .mi { display: flex; align-items: center; gap: 8px; padding: 4px 12px 4px 8px; white-space: nowrap; }
+#menu .mi:hover { background: var(--accent); color: #fff; }
+#menu .mi:hover svg { color: #fff; }
+#menu .mi.dis { opacity: .4; pointer-events: none; }
+#menu .mi .k { margin-left: auto; color: var(--muted); font-size: 11px; padding-left: 16px; }
+#menu .mi:hover .k { color: #fff; }
+#menu .ms { height: 1px; background: var(--border-soft); margin: 3px 0; }
+#modal { position: fixed; inset: 0; background: rgba(0,0,0,.25); z-index: 60; display: none; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+#modal.show { display: flex; }
+.dlg { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: var(--shadow); width: min(380px, calc(100vw - 24px)); padding: 12px; }
+.dlg h3 { margin: 0 0 8px; font-size: 13px; }
+.dlg p { margin: 0 0 8px; color: var(--muted); word-break: break-all; }
+.dlg .row { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.dlg .row.inline { flex-direction: row; align-items: center; gap: 6px; }
+.dlg input[type=text] { width: 100%; }
+.dlg .btns { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+.perm { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.perm th, .perm td { padding: 3px; text-align: center; border-bottom: 1px solid var(--border-soft); }
+.perm th:first-child, .perm td:first-child { text-align: left; }
+#toasts { position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 70; display: flex; flex-direction: column; gap: 6px; width: min(360px, calc(100vw - 20px)); pointer-events: none; }
+.toast { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent); padding: 7px 10px; border-radius: 4px; box-shadow: var(--shadow); word-break: break-word; }
+.toast.error { border-left-color: var(--danger); } .toast.ok { border-left-color: var(--ok); }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.5 3.5h4.2l1.4 1.5h7.4v8.5h-13z" fill="var(--folder)" stroke="var(--folder-dark)" stroke-width="1"/><path d="M1.5 6h13" stroke="var(--folder-dark)" stroke-width=".8"/></symbol>
+    <symbol id="i-folder-link" viewBox="0 0 16 16"><use href="#i-folder"/><path d="M8 9.5h4m-1.5-1.5 1.5 1.5-1.5 1.5" stroke="#1f6fd1" stroke-width="1.3" fill="none"/></symbol>
+    <symbol id="i-file" viewBox="0 0 16 16"><path d="M3.5 1.5h6l3 3v10h-9z" fill="var(--panel)" stroke="var(--file)"/><path d="M9.5 1.5v3h3" fill="none" stroke="var(--file)"/></symbol>
+    <symbol id="i-file-link" viewBox="0 0 16 16"><use href="#i-file"/><path d="M5.5 11h4m-1.5-1.5 1.5 1.5-1.5 1.5" stroke="#1f6fd1" stroke-width="1.3" fill="none"/></symbol>
+    <symbol id="i-file-code" viewBox="0 0 16 16"><use href="#i-file"/><path d="M6.5 8 5 9.5 6.5 11M9.5 8 11 9.5 9.5 11" stroke="#7c4dff" stroke-width="1.1" fill="none"/></symbol>
+    <symbol id="i-file-img" viewBox="0 0 16 16"><use href="#i-file"/><path d="M5 12.5 7 10l1.5 1.5 1-1 1.5 2z" fill="#2e9d5b"/><circle cx="6.3" cy="7.3" r=".9" fill="#e0a526"/></symbol>
+    <symbol id="i-file-zip" viewBox="0 0 16 16"><use href="#i-file"/><path d="M7.5 3v1m0 1v1m0 1v1" stroke="var(--file)" stroke-width="1.2"/><rect x="6.5" y="8.5" width="2" height="3" rx=".5" fill="#b0791e"/></symbol>
+    <symbol id="i-up" viewBox="0 0 16 16"><path d="M8 13V3.5M3.5 8 8 3.5 12.5 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-back" viewBox="0 0 16 16"><path d="M13 8H3.5M8 3.5 3.5 8 8 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-fwd" viewBox="0 0 16 16"><path d="M3 8h9.5M8 3.5 12.5 8 8 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-home" viewBox="0 0 16 16"><path d="M2.5 7.5 8 2.5l5.5 5M4 6.5v7h3v-4h2v4h3v-7" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v3h-3" fill="none" stroke="#2e8b3d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2v8.5M4.5 7 8 10.5 11.5 7" fill="none" stroke="#1f6fd1" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 11.5v2h11v-2" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 16 16"><path d="M8 11V2.5M4.5 6 8 2.5 11.5 6" fill="none" stroke="#e07b00" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 11.5v2h11v-2" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
+    <symbol id="i-newfolder" viewBox="0 0 16 16"><use href="#i-folder"/><path d="M11.5 8.5v4M9.5 10.5h4" stroke="#2e8b3d" stroke-width="1.6"/></symbol>
+    <symbol id="i-newfile" viewBox="0 0 16 16"><use href="#i-file"/><path d="M8 7.5v5M5.5 10h5" stroke="#2e8b3d" stroke-width="1.6"/></symbol>
+    <symbol id="i-delete" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="#d32f2f" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 16 16"><path d="M3 13l.6-2.8 7.2-7.2 2.2 2.2-7.2 7.2z" fill="#ffd54f" stroke="#a07800"/><path d="M9.8 4l2.2 2.2" stroke="#a07800"/></symbol>
+    <symbol id="i-rename" viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="13" height="7" rx="1" fill="none" stroke="currentColor"/><path d="M8 3v10M6.5 3h3M6.5 13h3" stroke="#1f6fd1" stroke-width="1.2"/></symbol>
+    <symbol id="i-perm" viewBox="0 0 16 16"><rect x="3.5" y="7" width="9" height="6.5" rx="1" fill="#ffd54f" stroke="#a07800"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="#263238" stroke="#263238"/><path d="M4 6l2 2-2 2M7.5 10.5h4" stroke="#7CFC9A" stroke-width="1.3" fill="none"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5.5" y="5.5" width="8" height="8.5" rx="1" fill="none" stroke="currentColor"/><path d="M3.5 10.5h-1V2.5h8v1" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-open" viewBox="0 0 16 16"><path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 16 16"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
+    <symbol id="i-tree" viewBox="0 0 16 16"><path d="M3 2.5v10.5h3M3 7.5h3" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="6.5" y="5.5" width="7" height="4" rx=".8" fill="var(--folder)" stroke="var(--folder-dark)" stroke-width=".8"/><rect x="6.5" y="11" width="7" height="4" rx=".8" fill="var(--folder)" stroke="var(--folder-dark)" stroke-width=".8"/><rect x="1.5" y="1" width="5" height="3" rx=".8" fill="var(--folder)" stroke="var(--folder-dark)" stroke-width=".8"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 16 16"><path d="M6 1.5h4l-.5 4 2.5 2.5v1H4v-1l2.5-2.5zM8 9v5.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+    <symbol id="i-window" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M1.5 5.5h13" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="i-x" viewBox="0 0 16 16"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="i-find" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10 10l3.5 3.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 10 10"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 16 16"><path d="M8 2.5v11M4 9.5l4 4 4-4" fill="none" stroke="#1f6fd1" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 16 16"><path d="M8 13.5v-11M4 6.5l4-4 4 4" fill="none" stroke="#e07b00" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div id="hdr">
+  <div id="conn"><span class="dot"></span><span class="host">—</span><span class="mode"></span></div>
+  <button class="ibtn" id="b-pin" title="Blocca su questa sessione"><svg class="i"><use href="#i-pin"/></svg></button>
+  <button class="ibtn" id="b-window" title="Apri in una finestra del browser"><svg class="i"><use href="#i-window"/></svg></button>
+  <button class="ibtn" id="b-settings" title="Impostazioni"><svg class="i"><use href="#i-gear"/></svg></button>
+</div>
+
+<div id="tb">
+  <button class="ibtn" data-act="back" title="Indietro"><svg class="i"><use href="#i-back"/></svg></button>
+  <button class="ibtn" data-act="fwd" title="Avanti"><svg class="i"><use href="#i-fwd"/></svg></button>
+  <button class="ibtn" data-act="up" title="Cartella superiore (⌫)"><svg class="i"><use href="#i-up"/></svg></button>
+  <button class="ibtn" data-act="home" title="Home"><svg class="i"><use href="#i-home"/></svg></button>
+  <button class="ibtn" data-act="refresh" title="Aggiorna (F5)"><svg class="i"><use href="#i-refresh"/></svg></button>
+  <span class="sep"></span>
+  <button class="ibtn" data-act="download" title="Scarica i file selezionati"><svg class="i"><use href="#i-download"/></svg></button>
+  <button class="ibtn" data-act="upload" title="Carica file qui"><svg class="i"><use href="#i-upload"/></svg></button>
+  <span class="sep"></span>
+  <button class="ibtn" data-act="newfile" title="Nuovo file"><svg class="i"><use href="#i-newfile"/></svg></button>
+  <button class="ibtn" data-act="newfolder" title="Nuova cartella"><svg class="i"><use href="#i-newfolder"/></svg></button>
+  <button class="ibtn" data-act="edit" title="Apri con l'editor (sincronizza al salvataggio)"><svg class="i"><use href="#i-edit"/></svg></button>
+  <button class="ibtn" data-act="rename" title="Rinomina (F2)"><svg class="i"><use href="#i-rename"/></svg></button>
+  <button class="ibtn" data-act="chmod" title="Permessi"><svg class="i"><use href="#i-perm"/></svg></button>
+  <button class="ibtn" data-act="delete" title="Elimina (⌘⌫)"><svg class="i"><use href="#i-delete"/></svg></button>
+  <span class="sep"></span>
+  <button class="ibtn" data-act="cdterm" title="Vai a questa cartella nel terminale"><svg class="i"><use href="#i-term"/></svg></button>
+  <button class="ibtn" data-act="hidden" id="b-hidden" title="Mostra file nascosti"><svg class="i"><use href="#i-eye"/></svg></button>
+  <button class="ibtn" data-act="tree" id="b-tree" title="Mostra albero cartelle"><svg class="i"><use href="#i-tree"/></svg></button>
+</div>
+
+<div id="pathrow">
+  <input id="path" spellcheck="false" autocomplete="off" placeholder="/percorso/remoto">
+  <input id="filter" placeholder="Filtra…" style="width: 90px" spellcheck="false" autocomplete="off">
+</div>
+
+<div id="banner"></div>
+
+<div id="main">
+  <div id="tree" tabindex="-1"></div>
+  <div id="splitter"></div>
+  <div id="listwrap" tabindex="0">
+    <table>
+      <colgroup><col class="c-name"><col class="c-size"><col class="c-date"><col class="c-own"><col class="c-grp"><col class="c-mode"></colgroup>
+      <thead><tr>
+        <th data-k="name">Nome</th><th data-k="size" class="num">Dimensione</th><th data-k="mtime" class="col-date">Modificato</th>
+        <th data-k="owner" class="col-own">Proprietario</th><th data-k="group" class="col-grp">Gruppo</th><th data-k="mode" class="col-mode">Permessi</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty">Cartella vuota — trascina qui dei file per caricarli</div>
+    <div id="loading">Caricamento…</div>
+  </div>
+  <div id="dropzone"><div><svg class="i" style="width:28px;height:28px"><use href="#i-upload"/></svg><div id="droptext">Rilascia per caricare</div></div></div>
+</div>
+
+<div id="foot">
+  <label title="Richiede la Shell Integration di iTerm2 sul server remoto"><input type="checkbox" id="follow"> Segui la cartella del terminale</label>
+  <span class="hint" id="followhint"></span>
+  <span id="count"></span>
+</div>
+
+<div id="xfer">
+  <div class="xh">
+    <span class="tab on" data-tab="transfers">Trasferimenti<span class="badge" id="xbadge" hidden></span></span>
+    <span class="tab" data-tab="edits">In modifica<span class="badge" id="ebadge" hidden></span></span>
+    <span class="sp"></span>
+    <button class="ibtn" id="b-xclear" title="Rimuovi completati"><svg class="i"><use href="#i-x"/></svg></button>
+    <button class="ibtn" id="b-xtoggle" title="Mostra/nascondi"><svg class="i" style="transform:rotate(-90deg)"><use href="#i-chev"/></svg></button>
+  </div>
+  <div class="xb" id="xbody"></div>
+</div>
+
+<div id="menu"></div>
+<div id="modal"></div>
+<div id="toasts"></div>
+
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const pj = (base, name) => (base === "/" ? "" : base.replace(/\/+$/, "")) + "/" + name;
+const parentOf = p => { const q = p.replace(/\/+$/, ""); const i = q.lastIndexOf("/"); return i <= 0 ? "/" : q.slice(0, i); };
+const baseName = p => p.replace(/\/+$/, "").split("/").pop() || "/";
+const icon = (id, cls = "i") => `<svg class="${cls}"><use href="#${id}"/></svg>`;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("sftp:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("sftp:" + k, JSON.stringify(v)); } catch {} },
+};
+
+const S = {
+  st: null, targetKey: null, path: null, entries: [], sel: new Set(), anchor: null, cursor: null,
+  sort: store.get("sort", { k: "name", d: 1 }), filter: "", back: [], fwd: [], lastPaths: store.get("lastPaths", {}),
+  transfers: [], edits: [], xtab: "transfers", loadSeq: 0, tree: new Map(), treeOpen: new Set(["/"]),
+};
+
+// ------------------------------------------------------------------ api --
+async function api(path, data, method) {
+  const opts = { method: method || (data === undefined ? "GET" : "POST"), headers: { "X-Token": TOKEN } };
+  if (data !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(data); }
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  if (!r.ok) throw new Error(text.replace(/^\d+: /, "") || r.statusText);
+  return text ? JSON.parse(text) : {};
+}
+const q = o => new URLSearchParams(o).toString();
+function toast(text, level = "info", ms = 3500) {
+  const el = document.createElement("div");
+  el.className = "toast " + level; el.textContent = text;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), level === "error" ? 7000 : ms);
+}
+async function run(fn) { try { return await fn(); } catch (e) { toast(e.message, "error"); } }
+
+// ------------------------------------------------------------ websocket --
+let ws, wsDelay = 500;
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(TOKEN)}`);
+  ws.onopen = () => { wsDelay = 500; };
+  ws.onmessage = ev => onMessage(JSON.parse(ev.data));
+  ws.onclose = () => { setConn({ status: "error", label: "Plugin non raggiungibile", mode: "riconnessione…" }); setTimeout(connectWS, wsDelay = Math.min(wsDelay * 2, 8000)); };
+}
+let changedTimer;
+function onMessage(m) {
+  if (m.type === "state") onState(m);
+  else if (m.type === "transfers") { S.transfers = m.items; renderXfer(); }
+  else if (m.type === "edits") { S.edits = m.items; renderXfer(); }
+  else if (m.type === "toast") toast(m.text, m.level);
+  else if (m.type === "cwd") { if (S.st) S.st.terminal_cwd = m.path; updateFollowHint(); if (m.path && followOn() && S.st?.status === "ready") navigate(m.path, { quiet: true }); }
+  else if (m.type === "changed") {
+    if (m.path === S.path) { clearTimeout(changedTimer); changedTimer = setTimeout(() => load(S.path, { keepSel: true, quiet: true }), 250); }
+    S.tree.delete(m.path);
+  }
+}
+
+function followOn() { return !!S.st?.settings?.follow; }
+
+function onState(st) {
+  const prevKey = S.targetKey, prevStatus = S.st?.status;
+  S.st = st;
+  const key = st.target ? (st.session_id + "|" + st.target.label) : null;
+  S.targetKey = key;
+  const t = st.target;
+  const modes = {
+    ready: t && t.multiplexed ? "connessione riusata (ControlMaster)" : "connessione separata",
+    connecting: "connessione in corso…", nomux: "nessun ControlMaster", pam: "proxy PAM (protetta)", error: "errore", nossh: "", idle: "",
+  };
+  setConn({ status: st.status, label: t ? t.label : (st.session_name || "Nessuna sessione SSH"), mode: modes[st.status] || "",
+            title: t ? t.command : "" });
+  $("#b-pin").classList.toggle("on", st.pinned);
+  $("#b-pin").title = st.pinned ? "Sbloccato: segui la sessione attiva" : "Blocca su questa sessione";
+  $("#follow").checked = !!st.settings.follow;
+  $("#b-hidden").classList.toggle("on", !!st.settings.show_hidden);
+  updateFollowHint();
+  renderBanner();
+  const ready = st.status === "ready";
+  document.body.classList.toggle("offline", !ready);
+  $$("#tb .ibtn").forEach(b => { if (!["tree", "hidden"].includes(b.dataset.act)) b.disabled = !ready; });
+  if (!ready) { if (key !== prevKey) { S.entries = []; S.path = null; S.sel.clear(); renderRows(); $("#path").value = ""; } return; }
+  if (key === prevKey && prevStatus === "ready" && S.path !== null) { renderRows(); renderTree(); return; }
+  {
+    if (key !== prevKey) { S.back = []; S.fwd = []; S.tree.clear(); S.treeOpen = new Set(["/"]); }
+    const start = (followOn() && st.terminal_cwd) || S.lastPaths[t.label] || st.home || "/";
+    navigate(start, { noHistory: true, fallback: st.home });
+  }
+}
+function setConn({ status, label, mode, title }) {
+  $("#conn .dot").className = "dot " + status;
+  $("#conn .host").textContent = label;
+  $("#conn .mode").textContent = mode ? "· " + mode : "";
+  $("#conn").title = title || "";
+}
+function updateFollowHint() {
+  const has = !!S.st?.terminal_cwd;
+  $("#followhint").textContent = S.st?.target && !has && followOn() && S.st.status === "ready" ? "(cartella del terminale non ancora rilevata)" : "";
+}
+
+function renderBanner() {
+  const st = S.st, b = $("#banner"), t = st.target;
+  let html = "";
+  if (st.status === "nossh") {
+    html = `<h3>Nessuna connessione SSH in questa sessione</h3><p>Apri una sessione con <code>ssh host</code>: il pannello si collega da solo alla stessa connessione.</p>`;
+  } else if (st.status === "pam") {
+    html = `<h3>Connessione tramite proxy PAM</h3><p>${esc(t.label)} passa da un proxy che registra la sessione: aprire un canale SFTP la farebbe cadere, quindi il pannello non la tocca.</p>`;
+  } else if (st.status === "nomux") {
+    html = `<h3>Impossibile riusare la connessione a ${esc(t.label)}</h3>
+      <p>Per questa sessione non c'è un ControlMaster attivo. Aggiungi questo a <code>~/.ssh/config</code> e ricollegati: il pannello userà la stessa connessione (senza password o 2FA di nuovo).</p>
+      <pre>${esc(st.snippet)}</pre>
+      <div class="actions"><button class="btn" data-b="copysnippet">Copia configurazione</button>
+      <button class="btn primary" data-b="direct">Apri una nuova connessione (chiavi/agent)</button>
+      <button class="btn" data-b="recheck">Ricontrolla</button></div>`;
+  } else if (st.status === "error") {
+    html = `<h3>Connessione SFTP fallita</h3><p>${esc(st.error)}</p>
+      <div class="actions"><button class="btn primary" data-b="recheck">Riprova</button>
+      ${t && !t.multiplexed ? '<button class="btn" data-b="copysnippet">Copia config ControlMaster</button>' : ""}</div>`;
+  }
+  b.innerHTML = html;
+  b.classList.toggle("show", !!html);
+}
+$("#banner").addEventListener("click", e => {
+  const a = e.target.closest("[data-b]")?.dataset.b;
+  if (a === "copysnippet") run(async () => { await api("/api/copy", { text: S.st.snippet }); toast("Configurazione copiata negli appunti", "ok"); });
+  if (a === "direct") run(() => api("/api/connect_direct", {}));
+  if (a === "recheck") run(() => api("/api/reconnect", {}));
+});
+
+// ------------------------------------------------------------ navigation --
+async function navigate(path, opts = {}) {
+  if (!path) return;
+  const prev = S.path;
+  const ok = await load(path, opts);
+  if (ok && prev && prev !== S.path && !opts.noHistory) { S.back.push(prev); S.fwd = []; }
+  updateNavButtons();
+}
+async function load(path, opts = {}) {
+  const seq = ++S.loadSeq;
+  if (!opts.quiet) $("#loading").style.display = "block";
+  try {
+    const r = await api("/api/ls?" + q({ path }));
+    if (seq !== S.loadSeq) return false;
+    const changedDir = r.path !== S.path;
+    S.path = r.path; S.entries = r.entries;
+    S.tree.set(r.path, r.entries.filter(e => e.dir).map(e => e.name));
+    if (changedDir || !opts.keepSel) { S.sel.clear(); S.anchor = null; S.cursor = null; }
+    else { const names = new Set(r.entries.map(e => e.name)); S.sel = new Set([...S.sel].filter(n => names.has(n))); }
+    setPathField(S.path);
+    if (S.st?.target) { S.lastPaths[S.st.target.label] = S.path; store.set("lastPaths", S.lastPaths); }
+    if (changedDir) { $("#filter").value = ""; S.filter = ""; $("#listwrap").scrollTop = 0; }
+    renderRows(); renderTree();
+    return true;
+  } catch (e) {
+    if (seq !== S.loadSeq) return false;
+    if (opts.fallback && opts.fallback !== path) return load(opts.fallback, { ...opts, fallback: null });
+    if (!opts.quiet) toast(`${path}: ${e.message}`, "error");
+    $("#path").value = S.path || "";
+    return false;
+  } finally {
+    if (seq === S.loadSeq) $("#loading").style.display = "none";
+  }
+}
+function setPathField(p) {
+  const el = $("#path"); el.value = p;
+  if (document.activeElement !== el) requestAnimationFrame(() => { el.scrollLeft = el.scrollWidth; });
+}
+function updateNavButtons() {
+  const ready = S.st?.status === "ready";
+  $('[data-act="back"]').disabled = !ready || !S.back.length;
+  $('[data-act="fwd"]').disabled = !ready || !S.fwd.length;
+  $('[data-act="up"]').disabled = !ready || S.path === "/";
+}
+function goBack() { if (!S.back.length) return; S.fwd.push(S.path); navigate(S.back.pop(), { noHistory: true }); }
+function goFwd() { if (!S.fwd.length) return; S.back.push(S.path); navigate(S.fwd.pop(), { noHistory: true }); }
+function goUp() {
+  if (S.path === "/") return;
+  const from = baseName(S.path);
+  navigate(parentOf(S.path)).then(() => { if (S.entries.some(e => e.name === from)) { S.sel = new Set([from]); S.cursor = S.anchor = from; renderRows(true); } });
+}
+
+// ---------------------------------------------------------------- list ---
+function visibleEntries() {
+  const hidden = !!S.st?.settings?.show_hidden, f = S.filter.toLowerCase();
+  const list = S.entries.filter(e => (hidden || !e.name.startsWith(".")) && (!f || e.name.toLowerCase().includes(f)));
+  const { k, d } = S.sort;
+  const cmpName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  list.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1;
+    let r = 0;
+    if (k === "size" || k === "mtime") r = (a[k] || 0) - (b[k] || 0);
+    else if (k !== "name") r = String(a[k] || "").localeCompare(String(b[k] || ""));
+    return (r || cmpName(a, b)) * d;
+  });
+  return list;
+}
+const EXT = {
+  code: "py js ts tsx jsx sh bash zsh rb go rs c h cpp java php pl lua json yml yaml toml xml html css conf cfg ini env sql md".split(" "),
+  img: "png jpg jpeg gif svg webp bmp ico tiff heic".split(" "),
+  zip: "zip tar gz tgz bz2 xz 7z rar zst deb rpm jar".split(" "),
+};
+function fileIcon(e) {
+  if (e.dir) return e.link ? "i-folder-link" : "i-folder";
+  if (e.link) return "i-file-link";
+  const x = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+  if (EXT.code.includes(x)) return "i-file-code";
+  if (EXT.img.includes(x)) return "i-file-img";
+  if (EXT.zip.includes(x)) return "i-file-zip";
+  return "i-file";
+}
+function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return n + " B";
+  const u = ["KB", "MB", "GB", "TB"]; let i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + " " + u[i];
+}
+function fmtDate(t) {
+  if (!t) return "";
+  const d = new Date(t * 1000), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+let VIS = [];
+function renderRows(scrollToCursor) {
+  VIS = visibleEntries();
+  const rows = [];
+  if (S.path && S.path !== "/" && !S.filter) rows.push(`<tr class="dot" data-up="1"><td class="name">${icon("i-folder")}<span>..</span></td><td></td><td class="col-date"></td><td class="col-own"></td><td class="col-grp"></td><td class="col-mode"></td></tr>`);
+  for (const e of VIS) {
+    const cls = [S.sel.has(e.name) ? "sel" : "", S.cursor === e.name ? "cursor" : "", e.name.startsWith(".") ? "dot" : ""].join(" ");
+    rows.push(`<tr class="${cls}" data-n="${esc(e.name)}" draggable="false">
+      <td class="name" title="${esc(e.name)}">${icon(fileIcon(e))}<span>${esc(e.name)}</span></td>
+      <td class="num">${e.dir ? "" : fmtSize(e.size)}</td>
+      <td class="col-date">${fmtDate(e.mtime)}</td>
+      <td class="col-own">${esc(e.owner)}</td><td class="col-grp">${esc(e.group)}</td>
+      <td class="col-mode mono">${esc(e.mode)}</td></tr>`);
+  }
+  $("#rows").innerHTML = rows.join("");
+  $("#empty").style.display = S.path && !VIS.length ? "block" : "none";
+  $$("thead th").forEach(th => {
+    th.querySelector(".ar")?.remove();
+    if (th.dataset.k === S.sort.k) th.insertAdjacentHTML("beforeend", `<span class="ar">${S.sort.d > 0 ? "▲" : "▼"}</span>`);
+  });
+  updateStatus();
+  if (scrollToCursor && S.cursor) rowEl(S.cursor)?.scrollIntoView({ block: "nearest" });
+}
+function updateStatus() {
+  const nd = VIS.filter(e => e.dir).length, nf = VIS.length - nd;
+  const selSize = VIS.filter(e => S.sel.has(e.name) && !e.dir).reduce((a, e) => a + (e.size || 0), 0);
+  $("#count").textContent = S.sel.size ? `${S.sel.size} selezionati${selSize ? " · " + fmtSize(selSize) : ""}` : (S.path ? `${nd} cartelle, ${nf} file` : "");
+  updateToolbar();
+}
+// Selection changes only toggle classes: rebuilding the rows between the two clicks
+// of a double click makes WKWebView (iTerm2 Toolbelt) drop the dblclick event.
+function paintSelection(scrollToCursor) {
+  for (const tr of $$("#rows tr[data-n]")) {
+    tr.classList.toggle("sel", S.sel.has(tr.dataset.n));
+    tr.classList.toggle("cursor", S.cursor === tr.dataset.n);
+  }
+  updateStatus();
+  if (scrollToCursor && S.cursor) rowEl(S.cursor)?.scrollIntoView({ block: "nearest" });
+}
+const rowEl = name => $$("#rows tr[data-n]").find(tr => tr.dataset.n === name);
+const entry = name => S.entries.find(e => e.name === name);
+const selected = () => VIS.filter(e => S.sel.has(e.name));
+function updateToolbar() {
+  const ready = S.st?.status === "ready", sel = selected(), one = sel.length === 1;
+  const set = (a, on) => { const b = $(`[data-act="${a}"]`); if (b) b.disabled = !ready || !on; };
+  set("download", sel.length > 0); set("delete", sel.length > 0); set("rename", one); set("chmod", sel.length > 0);
+  set("edit", one && !sel[0].dir); set("upload", true); set("newfile", true); set("newfolder", true); set("cdterm", true);
+  set("home", true); set("refresh", true);
+  updateNavButtons();
+}
+
+$$("thead th").forEach(th => th.addEventListener("click", () => {
+  const k = th.dataset.k;
+  S.sort = S.sort.k === k ? { k, d: -S.sort.d } : { k, d: 1 };
+  store.set("sort", S.sort); renderRows();
+}));
+
+const rowsEl = $("#rows");
+let lastClick = { key: null, t: 0, x: 0, y: 0 };
+rowsEl.addEventListener("mousedown", e => {
+  const tr = e.target.closest("tr"); if (!tr || e.button === 2 && S.sel.has(tr.dataset.n)) return;
+  const n = tr.dataset.up ? ".." : tr.dataset.n;
+  // our own double-click detection (works even if the native dblclick is lost)
+  if (e.button === 0 && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+    const now = Date.now(), near = Math.abs(e.clientX - lastClick.x) < 6 && Math.abs(e.clientY - lastClick.y) < 6;
+    if (lastClick.key === n && now - lastClick.t < 450 && near) {
+      lastClick = { key: null, t: 0, x: 0, y: 0 };
+      e.preventDefault();
+      return n === ".." ? goUp() : activate(entry(n));
+    }
+    lastClick = { key: n, t: now, x: e.clientX, y: e.clientY };
+  }
+  if (tr.dataset.up) return;
+  if (e.shiftKey && S.anchor) {
+    const names = VIS.map(x => x.name), a = names.indexOf(S.anchor), b = names.indexOf(n);
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    if (!(e.metaKey || e.ctrlKey)) S.sel.clear();
+    names.slice(lo, hi + 1).forEach(x => S.sel.add(x));
+  } else if (e.metaKey || e.ctrlKey) {
+    S.sel.has(n) ? S.sel.delete(n) : S.sel.add(n); S.anchor = n;
+  } else { S.sel = new Set([n]); S.anchor = n; }
+  S.cursor = n; paintSelection();
+});
+$("#listwrap").addEventListener("mousedown", e => { if (!e.target.closest("tr") && e.button === 0 && !e.target.closest("thead")) { S.sel.clear(); paintSelection(); } });
+rowsEl.addEventListener("dblclick", e => e.preventDefault()); // handled in mousedown
+function activate(e) {
+  if (!e) return;
+  if (e.dir) return navigate(pj(S.path, e.name));
+  const how = S.st.settings.dblclick;
+  if (how === "open") return openLocal(e);
+  if (how === "download") return download([e]);
+  return edit(e);
+}
+
+// ------------------------------------------------------------- actions ---
+function act(a) {
+  const sel = selected();
+  switch (a) {
+    case "back": return goBack();
+    case "fwd": return goFwd();
+    case "open": return activate(sel[0]);
+    case "up": return goUp();
+    case "home": return navigate(S.st.home || "/");
+    case "refresh": S.tree.clear(); return load(S.path, { keepSel: true });
+    case "download": return download(sel);
+    case "downloadto": return download(sel, true);
+    case "upload": return uploadPick(false);
+    case "uploadfolder": return uploadPick(true);
+    case "newfile": return newItem(false);
+    case "newfolder": return newItem(true);
+    case "edit": return sel[0] && !sel[0].dir && edit(sel[0]);
+    case "openlocal": return sel[0] && !sel[0].dir && openLocal(sel[0]);
+    case "rename": return sel.length === 1 && rename(sel[0]);
+    case "chmod": return sel.length && chmod(sel);
+    case "delete": return sel.length && del(sel);
+    case "cdterm": return run(() => api("/api/cd", { path: sel.length === 1 && sel[0].dir ? pj(S.path, sel[0].name) : S.path }));
+    case "copypath": return run(async () => { await api("/api/copy", { text: (sel.length ? sel.map(e => pj(S.path, e.name)) : [S.path]).join("\n") }); toast("Percorso copiato", "ok"); });
+    case "hidden": return run(() => api("/api/settings", { show_hidden: !S.st.settings.show_hidden }));
+    case "tree": return toggleTree();
+    case "selectall": S.sel = new Set(VIS.map(e => e.name)); return renderRows();
+  }
+}
+$("#tb").addEventListener("click", e => { const b = e.target.closest("[data-act]"); if (b && !b.disabled) act(b.dataset.act); });
+
+function download(list, ask = false) {
+  if (!list.length) return;
+  return run(async () => {
+    const r = await api("/api/download", { paths: list.map(e => pj(S.path, e.name)), ask });
+    if (!r.cancelled) { openXfer("transfers"); toast(`Download di ${list.length} elementi avviato`); }
+  });
+}
+function uploadPick(folder) { return run(async () => { const r = await api("/api/upload_pick", { dir: S.path, folder }); if (r.count) openXfer("transfers"); }); }
+function edit(e) { return run(async () => { await api("/api/edit", { path: pj(S.path, e.name) }); toast(`${e.name} aperto nell'editor: ogni salvataggio viene caricato sul server`, "ok", 5000); }); }
+function openLocal(e) { return run(() => api("/api/open_local", { path: pj(S.path, e.name) })); }
+async function newItem(folder) {
+  const name = await prompt_(folder ? "Nuova cartella" : "Nuovo file", "Nome", folder ? "nuova_cartella" : "nuovo_file.txt");
+  if (!name) return;
+  if (name.includes("/")) return toast("Il nome non può contenere /", "error");
+  await run(async () => {
+    await api(folder ? "/api/mkdir" : "/api/touch", { path: pj(S.path, name) });
+    await load(S.path, { keepSel: true, quiet: true });
+    S.sel = new Set([name]); S.cursor = S.anchor = name; renderRows(true);
+  });
+}
+async function rename(e) {
+  const name = await prompt_("Rinomina", e.dir ? "Nuovo nome della cartella" : "Nuovo nome del file", e.name, true);
+  if (!name || name === e.name) return;
+  const to = name.startsWith("/") ? name : pj(S.path, name);
+  await run(async () => {
+    await api("/api/rename", { from: pj(S.path, e.name), to });
+    await load(S.path, { keepSel: true, quiet: true });
+    if (!name.includes("/")) { S.sel = new Set([name]); S.cursor = S.anchor = name; renderRows(true); }
+  });
+}
+async function del(list) {
+  const dirs = list.filter(e => e.dir).length;
+  const what = list.length === 1 ? `"${list[0].name}"` : `${list.length} elementi`;
+  const ok = await confirm_("Elimina", `Eliminare definitivamente ${what} dal server?${dirs ? " Le cartelle vengono eliminate con tutto il contenuto." : ""}`, "Elimina", true);
+  if (!ok) return;
+  await run(async () => { await api("/api/delete", { paths: list.map(e => pj(S.path, e.name)) }); await load(S.path, { quiet: true }); });
+}
+async function chmod(list) {
+  const first = list[0].perm & 0o7777;
+  const who = [["Proprietario", 6], ["Gruppo", 3], ["Altri", 0]], what = [["Lettura", 4], ["Scrittura", 2], ["Esecuzione", 1]];
+  const hasDir = list.some(e => e.dir);
+  const html = `<h3>Permessi</h3><p>${list.length === 1 ? esc(list[0].name) : list.length + " elementi"}</p>
+    <table class="perm"><tr><th></th>${what.map(w => `<th>${w[0]}</th>`).join("")}</tr>
+    ${who.map(([n, s]) => `<tr><td>${n}</td>${what.map(([, b]) => `<td><input type="checkbox" data-bit="${b << s}" ${first & (b << s) ? "checked" : ""}></td>`).join("")}</tr>`).join("")}</table>
+    <div class="row inline"><label>Ottale</label><input type="text" id="octal" style="width:70px" value="${first.toString(8).padStart(3, "0")}"></div>
+    ${hasDir ? '<div class="row inline"><label><input type="checkbox" id="rec"> Applica ricorsivamente alle sottocartelle</label></div>' : ""}
+    <div class="btns"><button class="btn" data-r="0">Annulla</button><button class="btn primary" data-r="1">Applica</button></div>`;
+  const r = await dialog(html, d => {
+    const oct = $("#octal", d);
+    const sync = () => { let m = 0; $$("[data-bit]", d).forEach(c => { if (c.checked) m |= +c.dataset.bit; }); oct.value = ((parseInt(oct.value, 8) || 0) & 0o7000 | m).toString(8).padStart(3, "0"); };
+    $$("[data-bit]", d).forEach(c => c.addEventListener("change", sync));
+    oct.addEventListener("input", () => { const m = parseInt(oct.value, 8); if (!isNaN(m)) $$("[data-bit]", d).forEach(c => { c.checked = !!(m & +c.dataset.bit); }); });
+    return () => ({ mode: parseInt(oct.value, 8), recursive: !!$("#rec", d)?.checked });
+  });
+  if (!r || isNaN(r.mode)) return;
+  await run(async () => { await api("/api/chmod", { paths: list.map(e => pj(S.path, e.name)), mode: r.mode, recursive: r.recursive }); await load(S.path, { keepSel: true, quiet: true }); });
+}
+
+// --------------------------------------------------------- context menu --
+function showMenu(x, y, items) {
+  const m = $("#menu");
+  m.innerHTML = items.map(it => it === "-" ? '<div class="ms"></div>' :
+    `<div class="mi ${it.dis ? "dis" : ""}" data-a="${it.a}">${icon(it.i || "i-x")}<span>${esc(it.t)}</span>${it.k ? `<span class="k">${it.k}</span>` : ""}</div>`).join("");
+  m.style.display = "block";
+  const r = m.getBoundingClientRect();
+  m.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 4)) + "px";
+  m.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 4)) + "px";
+}
+function hideMenu() { $("#menu").style.display = "none"; }
+$("#menu").addEventListener("click", e => { const a = e.target.closest("[data-a]")?.dataset.a; hideMenu(); if (a) act(a); });
+document.addEventListener("mousedown", e => { if (!e.target.closest("#menu")) hideMenu(); });
+$("#listwrap").addEventListener("contextmenu", e => {
+  e.preventDefault();
+  if (S.st?.status !== "ready") return;
+  const tr = e.target.closest("tr[data-n]");
+  if (!tr) { S.sel.clear(); renderRows(); }
+  const sel = selected(), one = sel.length === 1, file = one && !sel[0].dir;
+  const items = sel.length ? [
+    ...(one && sel[0].dir ? [{ t: "Apri", a: "open", i: "i-folder" }] : []),
+    ...(file ? [{ t: "Modifica (sincronizza al salvataggio)", a: "edit", i: "i-edit" }, { t: "Apri con l'app predefinita", a: "openlocal", i: "i-open" }] : []),
+    "-",
+    { t: "Scarica", a: "download", i: "i-download" }, { t: "Scarica in…", a: "downloadto", i: "i-download" },
+    "-",
+    { t: "Rinomina", a: "rename", i: "i-rename", k: "F2", dis: !one }, { t: "Permessi…", a: "chmod", i: "i-perm" },
+    { t: "Copia percorso", a: "copypath", i: "i-copy" },
+    ...(one && sel[0].dir ? [{ t: "Apri nel terminale (cd)", a: "cdterm", i: "i-term" }] : []),
+    "-", { t: "Elimina", a: "delete", i: "i-delete", k: "⌘⌫" },
+  ] : [
+    { t: "Aggiorna", a: "refresh", i: "i-refresh", k: "F5" }, "-",
+    { t: "Carica file…", a: "upload", i: "i-upload" }, { t: "Carica cartella…", a: "uploadfolder", i: "i-upload" }, "-",
+    { t: "Nuovo file", a: "newfile", i: "i-newfile" }, { t: "Nuova cartella", a: "newfolder", i: "i-newfolder" }, "-",
+    { t: "Copia percorso", a: "copypath", i: "i-copy" }, { t: "Apri nel terminale (cd)", a: "cdterm", i: "i-term" },
+    { t: "Seleziona tutto", a: "selectall", i: "i-find", k: "⌘A" },
+  ];
+  showMenu(e.clientX, e.clientY, items);
+});
+
+// ------------------------------------------------------------- keyboard --
+$("#listwrap").addEventListener("keydown", e => {
+  if (S.st?.status !== "ready") return;
+  const names = VIS.map(x => x.name);
+  const i = names.indexOf(S.cursor);
+  const move = j => { j = Math.max(0, Math.min(names.length - 1, j)); const n = names[j]; if (n === undefined) return;
+    if (e.shiftKey && S.anchor) { const a = names.indexOf(S.anchor); const [lo, hi] = a < j ? [a, j] : [j, a]; S.sel = new Set(names.slice(lo, hi + 1)); }
+    else { S.sel = new Set([n]); S.anchor = n; }
+    S.cursor = n; paintSelection(true); e.preventDefault(); };
+  const k = e.key, mod = e.metaKey || e.ctrlKey;
+  if (k === "ArrowDown") move(i < 0 ? 0 : i + 1);
+  else if (k === "ArrowUp") move(i < 0 ? 0 : i - 1);
+  else if (k === "Home") move(0);
+  else if (k === "End") move(names.length - 1);
+  else if (k === "Enter") { e.preventDefault(); const s = selected(); if (s.length === 1) activate(s[0]); }
+  else if (k === "Backspace" && mod) { e.preventDefault(); act("delete"); }
+  else if (k === "Delete") { e.preventDefault(); act("delete"); }
+  else if (k === "Backspace" || (k === "ArrowUp" && mod)) { e.preventDefault(); goUp(); }
+  else if (k === "F2") { e.preventDefault(); act("rename"); }
+  else if (k === "F5" || (k === "r" && mod)) { e.preventDefault(); act("refresh"); }
+  else if (k === "a" && mod) { e.preventDefault(); act("selectall"); }
+  else if (k === "[" && mod) { e.preventDefault(); goBack(); }
+  else if (k === "]" && mod) { e.preventDefault(); goFwd(); }
+  else if (k.length === 1 && !mod) { // type-ahead
+    const t = (S._ta = (Date.now() - (S._tat || 0) < 700 ? (S._ta || "") : "") + k.toLowerCase()); S._tat = Date.now();
+    const j = names.findIndex(n => n.toLowerCase().startsWith(t)); if (j >= 0) move(j);
+  }
+});
+$("#path").addEventListener("keydown", e => {
+  if (e.key === "Enter") { const v = $("#path").value.trim(); if (v) navigate(v.startsWith("/") || v.startsWith("~") ? v.replace(/^~(?=\/|$)/, S.st.home || "~") : pj(S.path, v)); $("#listwrap").focus(); }
+  if (e.key === "Escape") { $("#path").value = S.path || ""; $("#listwrap").focus(); }
+});
+$("#filter").addEventListener("input", e => { S.filter = e.target.value; renderRows(); });
+$("#filter").addEventListener("keydown", e => { if (e.key === "Escape") { e.target.value = ""; S.filter = ""; renderRows(); $("#listwrap").focus(); } if (e.key === "ArrowDown") $("#listwrap").focus(); });
+
+// -------------------------------------------------------------- dialogs --
+let modalResolve = null;
+function dialog(html, setup) {
+  return new Promise(resolve => {
+    const m = $("#modal");
+    m.innerHTML = `<div class="dlg">${html}</div>`;
+    m.classList.add("show");
+    const d = $(".dlg", m);
+    const getter = setup ? setup(d) : null;
+    const done = v => { m.classList.remove("show"); m.innerHTML = ""; modalResolve = null; $("#listwrap").focus(); resolve(v); };
+    modalResolve = done;
+    d.addEventListener("click", e => { const r = e.target.closest("[data-r]")?.dataset.r; if (r !== undefined) done(r === "1" ? (getter ? getter() : true) : null); });
+    d.addEventListener("keydown", e => {
+      if (e.key === "Escape") { e.preventDefault(); done(null); }
+      if (e.key === "Enter" && e.target.tagName !== "BUTTON") { e.preventDefault(); done(getter ? getter() : true); }
+    });
+    const f = $("input[type=text], .btn.primary", d); f && setTimeout(() => { f.focus(); f.select?.(); }, 0);
+  });
+}
+$("#modal").addEventListener("mousedown", e => { if (e.target.id === "modal" && modalResolve) modalResolve(null); });
+function prompt_(title, label, value, selectStem) {
+  return dialog(`<h3>${esc(title)}</h3><div class="row"><label>${esc(label)}</label><input type="text" id="pv" value="${esc(value)}" spellcheck="false"></div>
+    <div class="btns"><button class="btn" data-r="0">Annulla</button><button class="btn primary" data-r="1">OK</button></div>`, d => {
+      const i = $("#pv", d);
+      if (selectStem) setTimeout(() => { const dot = value.lastIndexOf("."); i.setSelectionRange(0, dot > 0 ? dot : value.length); }, 1);
+      return () => i.value.trim();
+    });
+}
+function confirm_(title, text, okLabel, danger) {
+  return dialog(`<h3>${esc(title)}</h3><p>${esc(text)}</p><div class="btns"><button class="btn" data-r="0">Annulla</button>
+    <button class="btn primary ${danger ? "danger" : ""}" data-r="1" ${danger ? 'style="background:var(--danger);border-color:var(--danger)"' : ""}>${esc(okLabel)}</button></div>`);
+}
+async function openSettings() {
+  const s = S.st.settings;
+  const r = await dialog(`<h3>Impostazioni</h3>
+    <div class="row"><label>Cartella di download</label><div style="display:flex;gap:4px"><input type="text" id="s-dl" value="${esc(s.download_dir)}"><button class="btn" id="s-pick">Scegli…</button></div></div>
+    <div class="row inline"><label><input type="checkbox" id="s-ask" ${s.ask_download_dir ? "checked" : ""}> Chiedi sempre dove salvare</label></div>
+    <div class="row"><label>Comando dell'editor (il file viene aggiunto in fondo)</label><input type="text" id="s-ed" value="${esc(s.editor)}" placeholder="open -t"></div>
+    <p style="font-size:11px">Esempi: <code>open -t</code>, <code>open -a "Visual Studio Code"</code>, <code>open -a BBEdit</code></p>
+    <div class="row inline"><label><input type="checkbox" id="s-rc" ${s.reconnect ? "checked" : ""}> Se la connessione cade, proponi "Premi R per riconnetterti"</label></div>
+    <div class="row"><label>Host di proxy PAM da non toccare mai (separati da virgola)</label><input type="text" id="s-pam" value="${esc(s.pam_hosts)}" placeholder="pam-proxy.example.com"></div>
+    <div class="row"><label>Doppio clic su un file</label><select id="s-dbl">
+      <option value="edit" ${s.dblclick === "edit" ? "selected" : ""}>Modifica e sincronizza</option>
+      <option value="open" ${s.dblclick === "open" ? "selected" : ""}>Apri con l'app predefinita</option>
+      <option value="download" ${s.dblclick === "download" ? "selected" : ""}>Scarica</option></select></div>
+    <div class="btns"><button class="btn" data-r="0">Annulla</button><button class="btn primary" data-r="1">Salva</button></div>`, d => {
+      $("#s-pick", d).addEventListener("click", () => run(async () => { const r = await api("/api/pick_folder", {}); if (r.path) $("#s-dl", d).value = r.path; }));
+      return () => ({ download_dir: $("#s-dl", d).value.trim(), ask_download_dir: $("#s-ask", d).checked, editor: $("#s-ed", d).value.trim(), dblclick: $("#s-dbl", d).value, reconnect: $("#s-rc", d).checked, pam_hosts: $("#s-pam", d).value.trim() });
+    });
+  if (r) run(async () => { await api("/api/settings", r); toast("Impostazioni salvate", "ok"); });
+}
+$("#b-settings").addEventListener("click", openSettings);
+$("#b-pin").addEventListener("click", () => run(() => api("/api/pin", { pinned: !S.st.pinned })));
+$("#b-window").addEventListener("click", () => run(() => api("/api/open_browser", {})));
+$("#follow").addEventListener("change", e => run(async () => {
+  await api("/api/settings", { follow: e.target.checked });
+  if (e.target.checked && S.st.terminal_cwd) navigate(S.st.terminal_cwd);
+}));
+
+// ----------------------------------------------------------------- tree --
+function toggleTree(force) {
+  const on = force ?? !document.body.classList.contains("tree-on");
+  document.body.classList.toggle("tree-on", on);
+  $("#b-tree").classList.toggle("on", on);
+  store.set("tree", on);
+  if (on) renderTree();
+}
+async function treeChildren(path) {
+  if (!S.tree.has(path)) {
+    try { const r = await api("/api/ls?" + q({ path })); S.tree.set(path, r.entries.filter(e => e.dir).map(e => e.name)); }
+    catch { S.tree.set(path, []); }
+  }
+  return S.tree.get(path);
+}
+let treeSeq = 0;
+async function renderTree() {
+  if (!document.body.classList.contains("tree-on") || !S.path || S.st?.status !== "ready") return;
+  const seq = ++treeSeq;
+  // open every ancestor of the current folder
+  let p = S.path; while (p && p !== "/") { S.treeOpen.add(p); p = parentOf(p); }
+  const hidden = !!S.st.settings.show_hidden;
+  const out = [];
+  async function walk(path, name, depth) {
+    const open = S.treeOpen.has(path);
+    const kids = open ? (await treeChildren(path)).filter(n => hidden || !n.startsWith(".")).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })) : null;
+    out.push(`<div class="tn ${open ? "open" : ""} ${path === S.path ? "cur" : ""}" data-p="${esc(path)}" style="padding-left:${4 + depth * 12}px">
+      <span class="tw">${icon("i-chev", "")}</span>${icon(path === S.st.home ? "i-home" : "i-folder")}<span class="nm">${esc(name)}</span></div>`);
+    if (kids) for (const k of kids) await walk(pj(path, k), k, depth + 1);
+  }
+  await walk("/", "/", 0);
+  if (seq !== treeSeq) return;
+  $("#tree").innerHTML = out.join("");
+  $(".tn.cur")?.scrollIntoView({ block: "nearest" });
+}
+$("#tree").addEventListener("click", e => {
+  const n = e.target.closest(".tn"); if (!n) return;
+  const p = n.dataset.p;
+  if (e.target.closest(".tw")) { S.treeOpen.has(p) ? S.treeOpen.delete(p) : S.treeOpen.add(p); renderTree(); }
+  else navigate(p);
+});
+$("#tree").addEventListener("dblclick", e => { const n = e.target.closest(".tn"); if (n) { const p = n.dataset.p; S.treeOpen.has(p) ? S.treeOpen.delete(p) : S.treeOpen.add(p); renderTree(); } });
+(() => { // splitter
+  const sp = $("#splitter"), tree = $("#tree");
+  tree.style.width = store.get("treeW", 190) + "px";
+  sp.addEventListener("mousedown", e => {
+    e.preventDefault();
+    const x0 = e.clientX, w0 = tree.offsetWidth;
+    const mv = ev => { tree.style.width = Math.max(110, Math.min(innerWidth - 160, w0 + ev.clientX - x0)) + "px"; };
+    const up = () => { document.removeEventListener("mousemove", mv); document.removeEventListener("mouseup", up); store.set("treeW", tree.offsetWidth); };
+    document.addEventListener("mousemove", mv); document.addEventListener("mouseup", up);
+  });
+})();
+
+// ---------------------------------------------------------- drag & drop --
+let dragDepth = 0, dropRow = null;
+const main = $("#main");
+function hasFiles(e) { return [...(e.dataTransfer?.types || [])].includes("Files"); }
+main.addEventListener("dragenter", e => { if (!hasFiles(e) || S.st?.status !== "ready") return; e.preventDefault(); dragDepth++; document.body.classList.add("dragging"); });
+main.addEventListener("dragleave", e => { if (!hasFiles(e)) return; if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dragging"); setDropRow(null); } });
+main.addEventListener("dragover", e => {
+  if (!hasFiles(e) || S.st?.status !== "ready") return;
+  e.preventDefault(); e.dataTransfer.dropEffect = "copy";
+  const tr = e.target.closest?.("tr[data-n]");
+  const ent = tr && entry(tr.dataset.n);
+  setDropRow(ent && ent.dir ? tr : null);
+});
+function setDropRow(tr) {
+  if (dropRow === tr) return;
+  dropRow?.classList.remove("drop"); dropRow = tr; tr?.classList.add("drop");
+  $("#droptext").textContent = "Rilascia per caricare in " + (tr ? pj(S.path, tr.dataset.n) : S.path);
+}
+main.addEventListener("drop", async e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging");
+  const dir = dropRow ? pj(S.path, dropRow.dataset.n) : S.path; setDropRow(null);
+  // entries must be taken synchronously, DataTransfer is cleared after the event
+  const roots = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+  const plain = roots.length ? [] : [...e.dataTransfer.files];
+  const files = [];
+  async function walk(ent, prefix) {
+    if (ent.isFile) { const f = await new Promise((res, rej) => ent.file(res, rej)); files.push({ file: f, rel: prefix + ent.name }); return; }
+    const reader = ent.createReader();
+    let batch;
+    do { batch = await new Promise((res, rej) => reader.readEntries(res, rej)); for (const c of batch) await walk(c, prefix + ent.name + "/"); } while (batch.length);
+  }
+  try { for (const r of roots) await walk(r, ""); } catch (err) { return toast("Impossibile leggere i file trascinati: " + err.message, "error"); }
+  plain.forEach(f => files.push({ file: f, rel: f.name }));
+  if (!files.length) return;
+  if (dir === S.path) {
+    const tops = new Set(files.map(f => f.rel.split("/")[0]));
+    const clash = [...tops].filter(n => S.entries.some(x => x.name === n));
+    if (clash.length && !await confirm_("Sovrascrivere?", `${clash.length === 1 ? `"${clash[0]}" esiste già` : clash.length + " elementi esistono già"} in ${dir}. Sovrascrivere?`, "Sovrascrivi")) return;
+  }
+  uploadFiles(dir, files);
+});
+async function uploadFiles(dir, files) {
+  openXfer("transfers");
+  let i = 0, failed = 0;
+  const worker = async () => {
+    while (i < files.length) {
+      const { file, rel } = files[i++];
+      try {
+        const r = await fetch("/api/upload?" + q({ dir, rel, mtime: Math.floor((file.lastModified || Date.now()) / 1000) }), { method: "PUT", headers: { "X-Token": TOKEN }, body: file });
+        if (!r.ok) { failed++; const t = await r.text(); if (!t.includes("cancelled")) toast(`${rel}: ${t}`, "error"); }
+      } catch (err) { failed++; toast(`${rel}: ${err.message}`, "error"); }
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  if (!failed) toast(`${files.length} file caricati in ${dir}`, "ok");
+}
+// don't let the web view navigate to a dropped file
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+// ----------------------------------------------------------- transfers --
+function openXfer(tab) { $("#xfer").classList.add("open"); if (tab) setXTab(tab); store.set("xopen", true); updateXToggle(); }
+function setXTab(tab) { S.xtab = tab; $$("#xfer .tab").forEach(t => t.classList.toggle("on", t.dataset.tab === tab)); renderXfer(); }
+function updateXToggle() { $("#b-xtoggle svg").style.transform = $("#xfer").classList.contains("open") ? "rotate(90deg)" : "rotate(-90deg)"; }
+$$("#xfer .tab").forEach(t => t.addEventListener("click", () => { setXTab(t.dataset.tab); openXfer(); }));
+$("#b-xtoggle").addEventListener("click", () => { $("#xfer").classList.toggle("open"); store.set("xopen", $("#xfer").classList.contains("open")); updateXToggle(); });
+$("#b-xclear").addEventListener("click", () => run(() => api("/api/transfers_clear", {})));
+function renderXfer() {
+  const active = S.transfers.filter(t => t.state === "running" || t.state === "queued").length;
+  $("#xbadge").hidden = !active; $("#xbadge").textContent = active;
+  $("#ebadge").hidden = !S.edits.length; $("#ebadge").textContent = S.edits.length;
+  $("#b-xclear").style.visibility = S.xtab === "transfers" ? "visible" : "hidden";
+  const body = $("#xbody");
+  if (S.xtab === "transfers") {
+    if (!S.transfers.length) { body.innerHTML = '<div class="xempty">Nessun trasferimento. Trascina file dal Finder nel pannello per caricarli.</div>'; return; }
+    body.innerHTML = [...S.transfers].reverse().map(t => {
+      const pct = t.total ? Math.min(100, t.done / t.total * 100) : (t.state === "done" ? 100 : 0);
+      const stateTxt = { queued: "in coda", running: `${fmtSize(t.done)} / ${fmtSize(t.total)} · ${fmtSize(t.speed)}/s`, done: `${fmtSize(t.done)} · completato`, error: t.error, cancelled: "annullato" }[t.state];
+      const where = t.kind === "down" ? (t.local || "") : t.remote;
+      return `<div class="xi ${t.state}" title="${esc(where)}">${icon(t.kind === "down" ? "i-arrow-down" : "i-arrow-up")}
+        <div class="n">${esc(t.name)}</div>
+        <div class="acts">${t.state === "running" || t.state === "queued" ? `<button class="ibtn" data-cancel="${t.id}" title="Annulla">${icon("i-x")}</button>` : ""}
+          ${t.kind === "down" && t.state === "done" ? `<button class="ibtn" data-reveal="${t.id}" title="Mostra nel Finder">${icon("i-find")}</button>` : ""}</div>
+        <div class="bar"><div style="width:${pct}%"></div></div>
+        <div class="meta ${t.state === "error" ? "err" : ""}">${esc(stateTxt)}</div></div>`;
+    }).join("");
+  } else {
+    if (!S.edits.length) { body.innerHTML = '<div class="xempty">Nessun file in modifica. Doppio clic su un file per aprirlo nell\'editor: a ogni salvataggio viene caricato sul server.</div>'; return; }
+    body.innerHTML = S.edits.map(e => `<div class="xi ${e.state === "error" ? "error" : ""}" title="${esc(e.host + ":" + e.remote)}">${icon("i-edit")}
+      <div class="n">${esc(e.name)}</div>
+      <div class="acts"><button class="ibtn" data-stopedit="${e.id}" title="Smetti di sincronizzare">${icon("i-x")}</button></div>
+      <div class="meta">${esc(e.host)}:${esc(e.remote)}</div>
+      <div class="meta ${e.state === "error" ? "err" : ""}">${e.state === "uploading" ? "caricamento…" : e.state === "error" ? esc(e.error) : e.saved_at ? "salvato alle " + new Date(e.saved_at * 1000).toLocaleTimeString() : "in attesa di salvataggio"}</div></div>`).join("");
+  }
+}
+$("#xbody").addEventListener("click", e => {
+  const c = e.target.closest("[data-cancel]"), r = e.target.closest("[data-reveal]"), s = e.target.closest("[data-stopedit]");
+  if (c) run(() => api("/api/cancel", { id: c.dataset.cancel }));
+  if (r) run(() => api("/api/reveal", { id: r.dataset.reveal }));
+  if (s) run(() => api("/api/edit_stop", { id: s.dataset.stopedit }));
+});
+
+// ----------------------------------------------------------------- boot --
+if (store.get("xopen", false)) openXfer(); else updateXToggle();
+if (store.get("tree", false)) toggleTree(true);
+renderXfer();
+connectWS();
+$("#listwrap").focus();
+</script>
+</body>
+</html>
